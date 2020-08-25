@@ -1,5 +1,7 @@
 import requests
 from enum import Enum
+import socket
+from http.client import HTTPConnection
 
 AVATO_API_PREFIX = "/api"
 AVATO_GENERAL_INFIX = ""
@@ -19,7 +21,12 @@ class Endpoints(str, Enum):
     USER_PASSWORD = "/user/:userId/password",
     USER_PERMISSIONS = "/user/:userId/permissions",
     USER_TOKENS_COLLECTION = "/user/:userId/tokens",
-    USER_TOKEN = "/user/:userId/token/:tokenId"
+    USER_TOKEN = "/user/:userId/token/:tokenId",
+    USER_FILES_COLLECTION = "/user/:userId/files"
+    USER_FILE = "/user/:userId/file/:fileId",
+    USER_FILE_CHUNK = "/user/:userId/file/:fileId/chunk/:chunkHash"
+
+	
 
 class APIError(Exception):
     def __init__(self, body):
@@ -54,6 +61,16 @@ class UnknownError(APIError):
 
     pass
 
+
+class MyHTTPConnection(HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt( socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self.sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, 15)
+        if self._tunnel_host:
+            self._tunnel()
+
+requests.packages.urllib3.connectionpool.HTTPConnection = MyHTTPConnection
 
 class API:
     def __init__(
@@ -97,6 +114,12 @@ class API:
     def post(self, endpoint, req_body=None, headers={}):
         url = self.base_url + endpoint
         response = self.session.post(url, data=req_body, headers={**headers})
+        API.__check_response_status_code(response)
+        return response
+
+    def post_multipart(self, endpoint, parts=None, headers={}):
+        url = self.base_url + endpoint
+        response = self.session.post(url, files=parts, headers={**headers})
         API.__check_response_status_code(response)
         return response
 

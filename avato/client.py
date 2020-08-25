@@ -1,17 +1,23 @@
+from concurrent.futures import ThreadPoolExecutor, wait
 import json
+from typing import List
 from .config import AVATO_HOST, AVATO_PORT, AVATO_USE_SSL
-from .api import API, Endpoints, NotFoundError
+from .api import API, Endpoints
+from .storage import FileFormat, FileManifestBuilder, ChunkerBuilder, FileDescription, FileManifestMetadata, \
+    FileManifest, StorageCipher
 
 
 class Client:
     class UnknownInstanceTypeError(Exception):
         """Raised when the instance type requested is not supported"""
-
         pass
 
     class UnknownUserEmail(Exception):
         """Raised when the user email doesn't exist"""
+        pass
 
+    class FileUploadError(Exception):
+        """Raised when file upload fails"""
         pass
 
     def __init__(
@@ -45,7 +51,7 @@ class Client:
                 return instance
         raise Client.UnknownInstanceTypeError
 
-    def _get_user_id(self, email):
+    def _get_user_id(self, email: str):
         url = f"{Endpoints.USERS_COLLECTION}?email={email}"
         response = self.api.get(url)
         users = response.json()
@@ -78,3 +84,68 @@ class Client:
         response_json = response.json()
         instance_constructor = self._instance_from_type(type)
         return instance_constructor(self, response_json["id"], name, response_json["owner"])
+
+    def upload_user_file(
+        self,
+        email: str,
+        file_name: str,
+        file_path: str,
+        file_format: FileFormat,
+        key=None,
+        parallel_uploads=2
+    ) -> FileDescription:
+        user_id = self._get_user_id(email)
+        uploader = ThreadPoolExecutor(max_workers=parallel_uploads)
+        with ChunkerBuilder(file_path, file_format) as chunker:
+            # create manifest
+            file_manifest_builder = FileManifestBuilder(file_name, file_format, key is not None)
+            for chunk_hash, _ in chunker:
+                file_manifest_builder.add_chunk(chunk_hash)
+            (manifest, manifest_metadata) = file_manifest_builder.build()
+            print("manifest chunks:")
+            print(file_manifest_builder.chunks)
+            cipher = None
+            if key is not None:
+                cipher = StorageCipher(key)
+                manifest.content = cipher.encrypt(manifest.content)
+            file_description = self._upload_manifest(user_id, manifest, manifest_metadata)
+            # upload chunks
+            chunker.reset()
+            uploading = []
+            for chunk_hash, chunk_data in chunker:
+                url = Endpoints.USER_FILE_CHUNK \
+                        .replace(":userId", user_id) \
+                        .replace(":fileId", file_description.get("id")) \
+                        .replace(":chunkHash", chunk_hash)
+                if cipher is not None:
+                    chunk_data = cipher.encrypt(chunk_data)
+                uploading.append(uploader.submit(self.api.post, url, chunk_data, {"Content-type": "application/octet-stream"}))
+            wait(uploading)
+        return self.get_user_file(email, file_description.get("id"))
+
+    def _upload_manifest(self, user_id: str, manifest: FileManifest, manifest_metadata: FileManifestMetadata) -> FileDescription:
+        manifest_metadata_json = json.dumps(dict(manifest_metadata))
+        url = Endpoints.USER_FILES_COLLECTION.replace(":userId", user_id)
+        parts = {
+                "manifest": manifest.content,
+                "metadata": manifest_metadata_json
+                }
+        response = self.api.post_multipart(url, parts)
+        file_description: FileDescription = response.json()
+        return file_description
+
+    def delete_user_file(self, email: str, file_id: str):
+        url = Endpoints.USER_FILE \
+            .replace(":userId", self._get_user_id(email)) \
+            .replace(":fileId", file_id)
+        self.api.delete(url)
+
+    def get_user_file(self, email: str, file_id: str) -> FileDescription:
+        url = Endpoints.USER_FILE.replace(":userId", self._get_user_id(email)).replace(":fileId", file_id)
+        response = self.api.get(url)
+        return response.json()
+
+    def get_user_files_collection(self, email: str) -> List[FileDescription]:
+        url = Endpoints.USER_FILES_COLLECTION.replace(":userId", self._get_user_id(email))
+        response = self.api.get(url)
+        return response.json()
