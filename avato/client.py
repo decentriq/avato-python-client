@@ -1,11 +1,14 @@
+import os
 import json
 import queue
 from concurrent import futures
+from concurrent.futures import ProcessPoolExecutor
 import logging
 from itertools import repeat
 from typing import List
 from .config import AVATO_HOST, AVATO_PORT, AVATO_USE_SSL
 from .api import API, Endpoints
+from hashlib import sha256
 from .storage import FileFormat, FileManifestBuilder, ChunkerBuilder, FileDescription, FileManifestMetadata, \
     FileManifest, StorageCipher
 
@@ -92,29 +95,27 @@ class Client:
         instance_constructor = self._instance_from_type(type)
         return instance_constructor(self, response_json["id"], name, response_json["owner"])
 
-    @staticmethod
-    def _get_first(a):
-        return a[0]
-
     def upload_user_file(
         self,
         email: str,
         file_name: str,
         file_path: str,
         file_format: FileFormat,
-        key=None,
+        column_types: List[int],
+        extra_entropy: bytes,
+        key,
         chunk_size=8*1024**2,
         parallel_uploads=8
     ) -> FileDescription:
         user_id = self._get_user_id(email)
-        uploader = ThreadPoolExecutorWithQueueSizeLimit(max_workers=parallel_uploads, maxsize=parallel_uploads)
-        with ChunkerBuilder(file_path, file_format, chunk_size=chunk_size) as chunker:
+        uploader = ThreadPoolExecutorWithQueueSizeLimit(max_workers=parallel_uploads, maxsize=parallel_uploads*2)
+        with ChunkerBuilder(file_path, column_types, file_format, extra_entropy, chunk_size=chunk_size) as chunker:
             # create manifest
-            file_manifest_builder = FileManifestBuilder(file_name, file_format, key is not None)
+            file_manifest_builder = FileManifestBuilder(file_name, file_format, extra_entropy, key is not None)
             file_manifest_builder.chunks = [a for a, _ in chunker]
             (manifest, manifest_metadata) = file_manifest_builder.build()
-            logging.info("manifest chunks:")
-            logging.info(file_manifest_builder.chunks)
+            logging.debug("manifest chunks:")
+            logging.debug(file_manifest_builder.chunks)
             cipher = None
             if key is not None:
                 cipher = StorageCipher(key)
